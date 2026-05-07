@@ -400,9 +400,23 @@ app.post('/api/repos/:id/contributors', authenticateToken, async (req, res) => {
 
 app.delete('/api/repos/:id/contributors/:user_id', authenticateToken, async (req, res) => {
     try {
-        await db.query("DELETE FROM Contributors WHERE repo_id = $1 AND user_id = $2", [req.params.id, req.params.user_id]);
-        res.json({ message: "Access revoked." });
-    } catch (err) { res.status(500).json({ error: "Revocation failed." }); }
+        const repoId = req.params.id;
+        const userId = req.params.user_id;
+
+        // 1. Remove the user from the Contributors table
+        await db.query("DELETE FROM Contributors WHERE repo_id = $1 AND user_id = $2", [repoId, userId]);
+
+        // 2. GUI FIX: Delete their forked copies of this specific repository
+        // This will make the repository disappear from their dashboard entirely
+        await db.query("DELETE FROM Repositories WHERE owner_id = $1 AND forked_from_repo_id = $2", [userId, repoId]);
+
+        // 3. CLEANUP: Delete any pending Pull Requests they sent to this repo
+        await db.query("DELETE FROM Pull_Requests WHERE created_by = $1 AND target_repo_id = $2 AND status = 'open'", [userId, repoId]);
+
+        res.json({ message: "Contributor access revoked and forks purged." });
+    } catch (err) { 
+        res.status(500).json({ error: "Revocation failed." }); 
+    }
 });
 
 app.get('/api/repos/:id/leaderboard', authenticateToken, async (req, res) => {
