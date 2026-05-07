@@ -235,26 +235,57 @@ app.get('/api/repos/global', authenticateToken, async (req, res) => {
 
 app.get('/api/repos/:id', authenticateToken, async (req, res) => {
     try {
-        const repo = await db.query(`SELECT r.*, u.username as owner_name, u.profile_picture as owner_pfp FROM Repositories r JOIN Users u ON r.owner_id = u.user_id WHERE r.repo_id = $1`, [req.params.id]);
-        if (repo.rows.length === 0) return res.status(404).json({ error: "Not found." });
+        const repoId = req.params.id;
+        const uid = getUserId(req);
 
-        const items = await db.query('SELECT * FROM vw_folder_contents WHERE repo_id = $1', [req.params.id]);
-        const prs = await db.query("SELECT * FROM vw_active_prs WHERE target_repo_id = $1 AND status = 'open'", [req.params.id]);
-        const contributors = await db.query('SELECT u.user_id, u.username, u.profile_picture FROM Contributors c JOIN Users u ON c.user_id = u.user_id WHERE c.repo_id = $1', [req.params.id]);
+        // 1. Fetch the Repository metadata
+        const repoResult = await db.query('SELECT * FROM Repositories WHERE repo_id = $1', [repoId]);
+        if (repoResult.rows.length === 0) return res.status(404).json({ error: "Mainframe not found." });
+        const repo = repoResult.rows[0];
+
+        // 2. Security Check: Is the user the owner or a contributor?
+        const isOwner = repo.owner_id === uid;
+        const contrib = await db.query("SELECT * FROM Contributors WHERE repo_id = $1 AND user_id = $2", [repoId, uid]);
         
-        let canUpstream = false;
-        if (repo.rows[0].forked_from_repo_id) {
-            const parentOwner = await db.query("SELECT owner_id FROM Repositories WHERE repo_id = $1", [repo.rows[0].forked_from_repo_id]);
-            if (parentOwner.rows.length > 0) {
-                const friendCheck = await db.query(
-                    "SELECT 1 FROM FriendRequests WHERE status = 'accepted' AND ((sender_id=$1 AND receiver_id=$2) OR (sender_id=$2 AND receiver_id=$1))",
-                    [getUserId(req), parentOwner.rows[0].owner_id]
-                );
-                canUpstream = friendCheck.rows.length > 0;
-            }
+        if (!isOwner && contrib.rows.length === 0) {
+            return res.status(403).json({ error: "Access denied to this Mainframe." });
         }
-        res.json({ repo: repo.rows[0], items: items.rows, pullRequests: prs.rows, contributors: contributors.rows, canUpstream });
-    } catch (err) { res.status(500).json({ error: "Retrieval failed." }); }
+
+        // 3. FETCH FOLDERS (Filtered to hide deleted items)
+        const folders = await db.query(
+            'SELECT * FROM Folders WHERE repo_id = $1 AND is_deleted = FALSE ORDER BY name ASC', 
+            [repoId]
+        );
+
+        // 4. FETCH FILES (Filtered to hide deleted items)
+        const files = await db.query(
+            'SELECT * FROM Files WHERE repo_id = $1 AND is_deleted = FALSE ORDER BY name ASC', 
+            [repoId]
+        );
+
+        // 5. Fetch Pull Requests and Contributors for the sidebar/activity
+        const prs = await db.query("SELECT * FROM Pull_Requests WHERE target_repo_id = $1 ORDER BY created_at DESC", [repoId]);
+        const contributors = await db.query(`
+            SELECT u.user_id, u.username, u.profile_picture 
+            FROM Users u 
+            JOIN Contributors c ON u.user_id = c.user_id 
+            WHERE c.repo_id = $1
+        `, [repoId]);
+
+        // Return the full package to the frontend
+        res.json({
+            ...repo,
+            folders: folders.rows,
+            files: files.rows,
+            pullRequests: prs.rows,
+            contributors: contributors.rows,
+            isOwner
+        });
+
+    } catch (err) {
+        console.error("Fetch Error:", err);
+        res.status(500).json({ error: "Failed to load Mainframe details." });
+    }
 });
 
 app.delete('/api/repos/:id', authenticateToken, async (req, res) => {
