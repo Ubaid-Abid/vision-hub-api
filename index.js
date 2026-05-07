@@ -155,22 +155,15 @@ app.delete('/api/friends/:friendId', authenticateToken, async (req, res) => {
         const uid = getUserId(req);
         const fid = req.params.friendId;
         
-        await db.query(`
-            DELETE FROM Pull_Requests 
-            WHERE source_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2))
-               OR source_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1));
-
-            DELETE FROM FriendRequests 
-            WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1);
-            
-            DELETE FROM Contributors
-            WHERE (repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1) AND user_id = $2)
-               OR (repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2) AND user_id = $1);
-
-            DELETE FROM Repositories
-            WHERE (owner_id = $1 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2))
-               OR (owner_id = $2 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1));
-        `, [uid, fid]);
+        // SPLIT INTO SEPARATE QUERIES
+        await db.query(`DELETE FROM Pull_Requests WHERE source_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2)) OR source_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1))`, [uid, fid]);
+        
+        await db.query(`DELETE FROM FriendRequests WHERE (sender_id = $1 AND receiver_id = $2) OR (sender_id = $2 AND receiver_id = $1)`, [uid, fid]);
+        
+        await db.query(`DELETE FROM Contributors WHERE (repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1) AND user_id = $2) OR (repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2) AND user_id = $1)`, [uid, fid]);
+        
+        await db.query(`DELETE FROM Repositories WHERE (owner_id = $1 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $2)) OR (owner_id = $2 AND forked_from_repo_id IN (SELECT repo_id FROM Repositories WHERE owner_id = $1))`, [uid, fid]);
+        
         res.json({ message: "Friend removed. Access revoked and forks deleted." });
     } catch (err) { res.status(500).json({ error: "Friend removal failed." }); }
 });
@@ -286,25 +279,32 @@ app.post('/api/repos/:id/fork', authenticateToken, async (req, res) => {
         );
         const newRepoId = newRepo.rows[0].repo_id;
 
+        // SPLIT INTO SEPARATE QUERIES
         await db.query(`
             INSERT INTO Folders (repo_id, name, parent_folder_id, is_deleted)
-            SELECT $1, name, NULL, FALSE FROM Folders WHERE repo_id = $2 AND is_deleted = FALSE;
+            SELECT $1, name, NULL, FALSE FROM Folders WHERE repo_id = $2 AND is_deleted = FALSE
+        `, [newRepoId, req.params.id]);
 
+        await db.query(`
             INSERT INTO Files (repo_id, folder_id, name, file_type, content, is_deleted)
-            SELECT $1, NULL, name, file_type, content, FALSE FROM Files WHERE repo_id = $2 AND folder_id IS NULL AND is_deleted = FALSE;
+            SELECT $1, NULL, name, file_type, content, FALSE FROM Files WHERE repo_id = $2 AND folder_id IS NULL AND is_deleted = FALSE
+        `, [newRepoId, req.params.id]);
 
+        await db.query(`
             INSERT INTO Files (repo_id, folder_id, name, file_type, content, is_deleted)
             SELECT $1, nf.folder_id, f.name, f.file_type, f.content, FALSE
             FROM Files f
             JOIN Folders of ON f.folder_id = of.folder_id
             JOIN Folders nf ON of.name = nf.name
-            WHERE f.repo_id = $2 AND nf.repo_id = $1 AND f.is_deleted = FALSE;
+            WHERE f.repo_id = $2 AND nf.repo_id = $1 AND f.is_deleted = FALSE
         `, [newRepoId, req.params.id]);
 
         res.json({ message: "Fork successful", newRepoId });
-    } catch (err) { res.status(500).json({ error: "Fork failed." }); }
+    } catch (err) { 
+        console.error(err);
+        res.status(500).json({ error: "Fork failed." }); 
+    }
 });
-
 // ==========================================
 // 4. VERSION CONTROL (Commits, PRs, Merge)
 // ==========================================
@@ -374,11 +374,14 @@ app.post('/api/repos/:id/merge/:pr_Id', authenticateToken, async (req, res) => {
         if (pr.source_repo_id === pr.target_repo_id) {
             await db.query(`INSERT INTO Files (repo_id, folder_id, name, content, file_type, is_deleted) VALUES ($1, $2, $3, $4, 'file', FALSE)`, [req.params.id, pr.folder_id || null, pr.title, pr.description]);
         } else {
+            // SPLIT INTO SEPARATE QUERIES
             await db.query(`
                 INSERT INTO Files (repo_id, folder_id, name, content, file_type, is_deleted)
-                SELECT $1, folder_id, name, content, file_type, FALSE FROM Files WHERE repo_id = $2 AND is_deleted = FALSE AND name NOT IN (SELECT name FROM Files WHERE repo_id = $1 AND is_deleted = FALSE);
-                
-                UPDATE Files t SET content = s.content FROM Files s WHERE t.name = s.name AND t.repo_id = $1 AND s.repo_id = $2 AND s.is_deleted = FALSE;
+                SELECT $1, folder_id, name, content, file_type, FALSE FROM Files WHERE repo_id = $2 AND is_deleted = FALSE AND name NOT IN (SELECT name FROM Files WHERE repo_id = $1 AND is_deleted = FALSE)
+            `, [pr.target_repo_id, pr.source_repo_id]);
+            
+            await db.query(`
+                UPDATE Files t SET content = s.content FROM Files s WHERE t.name = s.name AND t.repo_id = $1 AND s.repo_id = $2 AND s.is_deleted = FALSE
             `, [pr.target_repo_id, pr.source_repo_id]);
         }
 
