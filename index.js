@@ -238,32 +238,32 @@ app.get('/api/repos/:id', authenticateToken, async (req, res) => {
         const repoId = req.params.id;
         const uid = getUserId(req);
 
-        // 1. Fetch the Repository metadata
+        // 1. Fetch Repository Metadata
         const repoResult = await db.query('SELECT * FROM Repositories WHERE repo_id = $1', [repoId]);
         if (repoResult.rows.length === 0) return res.status(404).json({ error: "Mainframe not found." });
         const repo = repoResult.rows[0];
 
-        // 2. Security Check: Is the user the owner or a contributor?
+        // 2. Security Check
         const isOwner = repo.owner_id === uid;
         const contrib = await db.query("SELECT * FROM Contributors WHERE repo_id = $1 AND user_id = $2", [repoId, uid]);
         
         if (!isOwner && contrib.rows.length === 0) {
-            return res.status(403).json({ error: "Access denied to this Mainframe." });
+            return res.status(403).json({ error: "Access denied." });
         }
 
-        // 3. FETCH FOLDERS (Filtered to hide deleted items)
+        // 3. FETCH FOLDERS (The fix is the 'AND is_deleted = FALSE')
         const folders = await db.query(
             'SELECT * FROM Folders WHERE repo_id = $1 AND is_deleted = FALSE ORDER BY name ASC', 
             [repoId]
         );
 
-        // 4. FETCH FILES (Filtered to hide deleted items)
+        // 4. FETCH FILES (The fix is the 'AND is_deleted = FALSE')
         const files = await db.query(
             'SELECT * FROM Files WHERE repo_id = $1 AND is_deleted = FALSE ORDER BY name ASC', 
             [repoId]
         );
 
-        // 5. Fetch Pull Requests and Contributors for the sidebar/activity
+        // 5. Fetch Activity Data (PRs and Contributors)
         const prs = await db.query("SELECT * FROM Pull_Requests WHERE target_repo_id = $1 ORDER BY created_at DESC", [repoId]);
         const contributors = await db.query(`
             SELECT u.user_id, u.username, u.profile_picture 
@@ -272,7 +272,6 @@ app.get('/api/repos/:id', authenticateToken, async (req, res) => {
             WHERE c.repo_id = $1
         `, [repoId]);
 
-        // Return the full package to the frontend
         res.json({
             ...repo,
             folders: folders.rows,
