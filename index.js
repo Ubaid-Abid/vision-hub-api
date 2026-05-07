@@ -236,54 +236,40 @@ app.get('/api/repos/global', authenticateToken, async (req, res) => {
 app.get('/api/repos/:id', authenticateToken, async (req, res) => {
     try {
         const repoId = req.params.id;
-        const uid = getUserId(req);
 
-        // 1. Fetch Repository Metadata
-        const repoResult = await db.query('SELECT * FROM Repositories WHERE repo_id = $1', [repoId]);
-        if (repoResult.rows.length === 0) return res.status(404).json({ error: "Mainframe not found." });
-        const repo = repoResult.rows[0];
-
-        // 2. Security Check
-        const isOwner = repo.owner_id === uid;
-        const contrib = await db.query("SELECT * FROM Contributors WHERE repo_id = $1 AND user_id = $2", [repoId, uid]);
-        
-        if (!isOwner && contrib.rows.length === 0) {
-            return res.status(403).json({ error: "Access denied." });
-        }
-
-        // 3. FETCH FOLDERS (The fix is the 'AND is_deleted = FALSE')
-        const folders = await db.query(
-            'SELECT * FROM Folders WHERE repo_id = $1 AND is_deleted = FALSE ORDER BY name ASC', 
-            [repoId]
-        );
-
-        // 4. FETCH FILES (The fix is the 'AND is_deleted = FALSE')
-        const files = await db.query(
-            'SELECT * FROM Files WHERE repo_id = $1 AND is_deleted = FALSE ORDER BY name ASC', 
-            [repoId]
-        );
-
-        // 5. Fetch Activity Data (PRs and Contributors)
-        const prs = await db.query("SELECT * FROM Pull_Requests WHERE target_repo_id = $1 ORDER BY created_at DESC", [repoId]);
-        const contributors = await db.query(`
-            SELECT u.user_id, u.username, u.profile_picture 
-            FROM Users u 
-            JOIN Contributors c ON u.user_id = c.user_id 
-            WHERE c.repo_id = $1
+        // 1. Restore exact repo structure (fixes the data.repo.owner_name crash)
+        const repo = await db.query(`
+            SELECT r.*, u.username as owner_name, u.profile_picture as owner_pfp 
+            FROM Repositories r JOIN Users u ON r.owner_id = u.user_id 
+            WHERE r.repo_id = $1
         `, [repoId]);
 
+        if (repo.rows.length === 0) return res.status(404).json({ error: "Repo not found." });
+
+        // 2. Restore exact items structure with Postgres-safe FALSE filter (fixes the Trash issue)
+        const items = await db.query(`
+            SELECT name, 'folder' as type, folder_id as id, parent_folder_id as parent, repo_id 
+            FROM Folders WHERE repo_id = $1 AND is_deleted = FALSE
+            UNION ALL 
+            SELECT name, 'file' as type, file_id as id, folder_id as parent, repo_id 
+            FROM Files WHERE repo_id = $1 AND is_deleted = FALSE
+        `, [repoId]);
+
+        // 3. Restore PRs and Contributors
+        const prs = await db.query("SELECT pr.*, u.username as requester_name FROM Pull_Requests pr JOIN Users u ON pr.created_by = u.user_id WHERE target_repo_id = $1", [repoId]);
+        const contributors = await db.query("SELECT u.user_id, u.username, u.profile_picture FROM Users u JOIN Contributors c ON u.user_id = c.user_id WHERE c.repo_id = $1", [repoId]);
+
+        // 4. Send the EXACT payload shape RepoDetail.tsx expects
         res.json({
-            ...repo,
-            folders: folders.rows,
-            files: files.rows,
+            repo: repo.rows[0],
+            items: items.rows,
             pullRequests: prs.rows,
             contributors: contributors.rows,
-            isOwner
+            canUpstream: !!repo.rows[0].forked_from_repo_id
         });
-
-    } catch (err) {
+    } catch (err) { 
         console.error("Fetch Error:", err);
-        res.status(500).json({ error: "Failed to load Mainframe details." });
+        res.status(500).json({ error: "Fetch failed." }); 
     }
 });
 
